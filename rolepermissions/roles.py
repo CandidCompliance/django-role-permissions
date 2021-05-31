@@ -4,6 +4,7 @@ import inspect
 
 from six import add_metaclass
 
+from django.db.models import F
 from django.contrib.auth.models import Group, Permission
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
@@ -11,7 +12,7 @@ from django.contrib.contenttypes.models import ContentType
 from rolepermissions.utils import camelToSnake, camel_or_snake_to_title
 from rolepermissions.exceptions import RoleDoesNotExist
 
-
+from authentication.models import UserGroups
 registered_roles = {}
 
 
@@ -54,7 +55,7 @@ class AbstractUserRole(object):
         return camelToSnake(cls.__name__)
 
     @classmethod
-    def assign_role_to_user(cls, user):
+    def assign_role_to_user(cls, user, organization):
         """
         Assign this role to a user.
 
@@ -62,9 +63,11 @@ class AbstractUserRole(object):
             new role.
         """
         group, _created = Group.objects.get_or_create(name=cls.get_name())
-        user.groups.add(group)
-        permissions_to_add = cls.get_default_true_permissions()
-        user.user_permissions.add(*permissions_to_add)
+        # user.groups.add(group, through_defaults={'organization_id': organization.id})
+        UserGroups.objects.create(group=group, user=user, organization=organization)
+
+        # permissions_to_add = cls.get_default_true_permissions()
+        # user.user_permissions.add(*permissions_to_add)
 
         return group
 
@@ -93,7 +96,7 @@ class AbstractUserRole(object):
         return adjusted_true_permissions
 
     @classmethod
-    def remove_role_from_user(cls, user):
+    def remove_role_from_user(cls, user, organization):
         """
         Remove this role from a user.
 
@@ -124,18 +127,20 @@ class AbstractUserRole(object):
         """
 
         # Grab the adjusted true permissions before the removal
-        current_adjusted_true_permissions = cls._get_adjusted_true_permissions(user)
+#        current_adjusted_true_permissions = cls._get_adjusted_true_permissions(user)
 
         group, _created = cls.get_or_create_group()
-        user.groups.remove(group)
+
+        groups = UserGroups.objects.filter(user=user, organization=organization).delete()
+
 
         # Grab the adjusted true permissions after the removal
-        new_adjusted_true_permissions = cls._get_adjusted_true_permissions(user)
+#        new_adjusted_true_permissions = cls._get_adjusted_true_permissions(user)
 
         # Remove true permissions that were default granted only by the removed role
-        permissions_to_remove = (current_adjusted_true_permissions
-                                 .difference(new_adjusted_true_permissions))
-        user.user_permissions.remove(*permissions_to_remove)
+#        permissions_to_remove = (current_adjusted_true_permissions
+#                                 .difference(new_adjusted_true_permissions))
+#        user.user_permissions.remove(*permissions_to_remove)
 
         return group
 
@@ -143,14 +148,6 @@ class AbstractUserRole(object):
     def permission_names_list(cls):
         available_permissions = getattr(cls, 'available_permissions', {})
         return available_permissions.keys()
-
-    @classmethod
-    def get_all_permissions(cls):
-        permission_names = list(cls.permission_names_list())
-        if permission_names:
-            return cls.get_or_create_permissions(permission_names)
-
-        return []
 
     @classmethod
     def get_default_true_permissions(cls):
@@ -204,17 +201,20 @@ def retrieve_role(role_name):
     return RolesManager.retrieve_role(role_name)
 
 
-def get_user_roles(user):
+def get_user_roles(user, organization):
     """Get a list of a users's roles."""
     if user:
-        groups = user.groups.all()   # Important! all() query may be cached on User with prefetch_related.
+        groups = UserGroups.objects.filter(user=user, organization=organization).annotate(name=F('group__name'))
+
+#        groups = user.groups.filter(organization=organization)   # Important! all() query may be cached on User with prefetch_related.
+#        roles = (print(vars(group)) for group in groups if group.name in RolesManager.get_roles_names())
+
         roles = (RolesManager.retrieve_role(group.name) for group in groups if group.name in RolesManager.get_roles_names())
         return sorted(roles, key=lambda r: r.get_name() )
     else:
         return []
 
-
-def _assign_or_remove_role(user, role, method_name):
+def _assign_or_remove_role(user, role, organization, method_name):
     role_cls = role
     if not inspect.isclass(role):
         role_cls = retrieve_role(role)
@@ -222,26 +222,26 @@ def _assign_or_remove_role(user, role, method_name):
     if not role_cls:
         raise RoleDoesNotExist
 
-    getattr(role_cls, method_name)(user)
+    getattr(role_cls, method_name)(user, organization)
 
     return role_cls
 
 
-def assign_role(user, role):
-    """Assign a role to a user."""
-    return _assign_or_remove_role(user, role, "assign_role_to_user")
+def assign_role(user, role, organization):
+    """Assign a role to a user for an organization."""
+    return _assign_or_remove_role(user, role, organization, "assign_role_to_user")
 
 
-def remove_role(user, role):
-    """Remove a role from a user."""
-    return _assign_or_remove_role(user, role, "remove_role_from_user")
+def remove_role(user, role, organization):
+    """Remove a role from a user for an organization."""
+    return _assign_or_remove_role(user, role, organization, "remove_role_from_user")
 
 
-def clear_roles(user):
-    """Remove all roles from a user."""
-    roles = get_user_roles(user)
+def clear_roles(user, organization):
+    """Remove all roles from a user for an organization."""
+    roles = get_user_roles(user, organization)
 
     for role in roles:
-        role.remove_role_from_user(user)
+        role.remove_role_from_user(user, organization)
 
     return roles
